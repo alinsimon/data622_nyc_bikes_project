@@ -6,8 +6,9 @@ the collected station-status data are large.
 
 ## Citi Bike trip history
 
-The notebook downloads the January 2026 archive on first use and caches it in
-the system temp folder (`tempfile.gettempdir()`), not in this folder:
+The notebook's `fetch-data` step downloads the January 2026 archive on first
+use and saves it in this folder, along with the live GBFS station-status and
+station-information JSON files:
 
 - [January 2026 trip archive](https://s3.amazonaws.com/tripdata/202601-citibike-tripdata.zip)
 - [Citi Bike system data page](https://citibikenyc.com/system-data)
