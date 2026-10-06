@@ -10,6 +10,9 @@ The notebook's `fetch-data` step downloads the January and September 2026 archiv
 use and saves it in this folder, along with the live GBFS station-status and
 station-information JSON files:
 
+Existing station-status and station-information JSON files are reused without
+downloading again. In order to fetch a fresh live snapshota delete the corresponding JSON file.
+
 - [January 2026 trip archive](https://s3.amazonaws.com/tripdata/202601-citibike-tripdata.zip)
 - [September 2026 trip archive](https://s3.amazonaws.com/tripdata/202609-citibike-tripdata.zip)
 - [Citi Bike system data page](https://citibikenyc.com/system-data)
