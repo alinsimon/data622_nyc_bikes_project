@@ -33,7 +33,8 @@ The notebook's station-status analysis uses the project's historical snapshots
 and station reference data. These are not included in Git and must be available
 locally at:
 
-- `datasource/station_status/station_status/`
+- `datasource/station_status/`
+This one is being donwloaded from https://console.cloud.google.com/bigquery?project=eliot-463900&ws=!1m6!1m5!4m3!1sbigquery-public-data!2ssan_francisco_bikeshare!3sbikeshare_station_status!23sRESOURCE_LIST
 - `datasource/station_info.parquet`
 
 The current Citi Bike GBFS station-status feed provides live station status,

@@ -1,2 +1,6 @@
 /datasource/*
 !/datasource/README.md
+!/datasource/station_information.json
+!/datasource/station_info.parquet
+!/datasource/station_status.json
+!/datasource/station_status/
