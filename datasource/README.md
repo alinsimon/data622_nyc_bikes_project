@@ -1,8 +1,6 @@
 # Data sources
 
-The project stores downloaded and locally collected data in this folder. Raw
-data files are intentionally excluded from Git because the public archives and
-historical station status files are large.
+The project stores downloaded collected data in this folder.
 
 ## Citi Bike trip history
 
