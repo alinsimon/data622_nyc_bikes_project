@@ -22,7 +22,11 @@ complete hour (the Open-Meteo archive trails real time by about five days), so n
 GBFS station list otherwise, so the station count can differ slightly from the historical export.
 
 Not collected by the jobs: `station_status/` and `station_info.parquet` (a manual BigQuery and Spark export) and the MTA Weekender closure
-windows, which are entered by hand in the analysis notebook.
+windows, which are entered by hand in the analysis notebook. Upload the first two to the volume once.
+
+[`Citi Bike Demand Analysis - Databricks.ipynb`](../Citi%20Bike%20Demand%20Analysis%20-%20Databricks.ipynb) is the analysis and modeling notebook for
+Databricks. It reads everything from the volume (the trip CSVs the job has already unzipped) and downloads nothing; if a file is missing it
+stops and names the job that collects it. Outside Databricks it reads this local `datasource` folder instead.
 
 Deploy and run with `databricks bundle deploy -t prod` and `databricks bundle run external_data_download -t prod`.
 
