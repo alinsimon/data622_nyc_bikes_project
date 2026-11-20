@@ -2,6 +2,30 @@
 
 The project stores downloaded collected data in this folder.
 
+## Databricks download jobs
+
+Two jobs in [`databricks.yml`](../databricks.yml) collect the raw data into the Unity Catalog volume
+`/Volumes/<catalog>/<schema>/<volume>/datasource` (default `workspace.citibike.raw`), using the same file names as this folder.
+
+| Job | Notebook | Schedule (New York time) | Collects |
+|---|---|---|---|
+| `citibike-download` | [`citibike_download.py`](../citibike_download.py) | Mondays 06:00 | Monthly trip archives, including newly published months |
+| `external-data-download` | [`external_data_download.py`](../external_data_download.py) | Daily 05:00 | MTA alerts, delay incidents, stations and ridership, live MTA alert feed, GBFS station feeds, Open-Meteo weather |
+
+`external_data_download.py` refreshes `mta_subway_alerts_2026.csv` and `mta_g_delay_incidents_monthly.csv` on every run. The live MTA alert
+feed and the GBFS station information and status feeds are archived with a timestamp in `mta_live_alerts/`, `gbfs_station_information/` and
+`gbfs_station_status/`, which builds the history the live feeds do not keep. The undated `mta_live_alerts_snapshot.json`,
+`station_information.json` and `station_status.json` are written only when missing, so the analysis inputs stay fixed. The MTA stations
+file, the 2012 to 2020 alerts, the hourly ridership and the extended weather file are downloaded once and skipped afterwards; run the job with
+`force_refresh = true` to download them again. `greenpoint_weather_hourly_2026.csv` is seeded once and then extended on every run with each new
+complete hour (the Open-Meteo archive trails real time by about five days), so new months arrive without any code change. Weather uses `station_info.parquet` from the volume when it has been uploaded and the live
+GBFS station list otherwise, so the station count can differ slightly from the historical export.
+
+Not collected by the jobs: `station_status/` and `station_info.parquet` (a manual BigQuery and Spark export) and the MTA Weekender closure
+windows, which are entered by hand in the analysis notebook.
+
+Deploy and run with `databricks bundle deploy -t prod` and `databricks bundle run external_data_download -t prod`.
+
 ## Citi Bike trip history
 
 The proposal notebook contains a `fetch-data` step that downloads the January
