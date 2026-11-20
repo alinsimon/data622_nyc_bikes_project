@@ -91,8 +91,8 @@ resources:
           timeout_seconds: 7200
 
         # Optional: rerun the analysis only when new months arrived.
-        # Uncomment after "Citi Bike Demand Analysis" reads from the volume instead of downloading itself,
-        # and check its exact file name and extension (.py or .ipynb) on GitHub.
+        # Uncomment once station_info.parquet and the station_status folder have been uploaded to the volume
+        # (they are manual exports), and add the weekly job's task as a dependency if both should run together.
         #
         # - task_key: has_new_months
         #   depends_on:
@@ -107,7 +107,7 @@ resources:
         #     - task_key: has_new_months
         #       outcome: "true"
         #   notebook_task:
-        #     notebook_path: "./Citi Bike Demand Analysis.ipynb"
+        #     notebook_path: "./Citi Bike Demand Analysis - Databricks.ipynb"
         #   timeout_seconds: 7200
 
     external_data_download:
