@@ -29,17 +29,60 @@ pyproject.toml        package metadata, dependencies and pytest settings
 
 ## Databricks architecture
 
-```text
-Citi Bike S3, MTA and NY Open Data, Open-Meteo, GBFS
-        |  citibike-download (weekly), external-data-download (daily)
-        v
-Volume /Volumes/workspace/citibike/raw/datasource        raw files, unchanged
-        |  citibike-prepare (after each weekly download)
-        v
-Delta tables workspace.citibike.*                         raw_* copies, cleaned tables, analysis panels
-        |  src/citibike/data_access.py
-        v
-Analysis notebook (Databricks or VS Code)                 exploration, features, models, evaluation
+```mermaid
+flowchart TB
+    subgraph SRC["Public data sources"]
+        direction LR
+        S1["Citi Bike trip archives<br/>monthly ZIP files on Amazon S3"]
+        S2["MTA and NY Open Data APIs<br/>alerts, incidents, stations, ridership"]
+        S3["Open-Meteo<br/>hourly weather archive"]
+        S4["Citi Bike GBFS<br/>live station feeds"]
+        S5["Station status and station<br/>information export"]
+    end
+
+    subgraph JOBS["Databricks jobs (serverless)"]
+        direction LR
+        J1["<b>citibike-download</b><br/>Mondays 06:00<br/>downloads and unzips trip months"]
+        J2["<b>external-data-download</b><br/>daily 05:00<br/>MTA, weather and GBFS files"]
+        J3["<b>citibike-prepare</b><br/>after each weekly download<br/>cleans files, builds tables"]
+    end
+
+    subgraph UC["Unity Catalog: workspace.citibike"]
+        V[("<b>Volume raw/datasource</b><br/>raw files, unchanged")]
+        subgraph TABLES["Delta tables"]
+            direction LR
+            T1[("<b>Raw tables</b><br/>raw_* (10)<br/>reference files as tables")]
+            T2[("<b>Cleaned tables</b> (7)<br/>trips, trips_station_hourly,<br/>station_status_hourly, stations,<br/>weather_hourly, mta_g_stops")]
+            T3[("<b>Analysis tables</b> (11)<br/>station hour panels, station sets,<br/>closures, baselines, quality checks")]
+        end
+    end
+
+    NB["<b>This notebook</b><br/>Sections 2 to 6: exploration,<br/>features, models, evaluation"]
+
+    S1 --> J1
+    S2 --> J2
+    S3 --> J2
+    S4 --> J2
+    S5 -.->|uploaded once| V
+    J1 -->|trip CSV files| V
+    J2 -->|MTA, weather, GBFS files| V
+    J1 ==>|then starts| J3
+    V --> J3
+    J3 --> T1
+    J3 --> T2
+    J3 --> T3
+    T1 -->|read_table| NB
+    T2 -->|read_table| NB
+    T3 -->|read_table| NB
+
+    classDef source fill:#eef2f7,stroke:#5b6b82,color:#1f2a37
+    classDef job fill:#fdebd3,stroke:#c26a00,color:#3d2200
+    classDef storage fill:#e3f1e6,stroke:#2f7d43,color:#123d1e
+    classDef consumer fill:#e6e9fb,stroke:#3f4fbf,color:#141c4d
+    class S1,S2,S3,S4,S5 source
+    class J1,J2,J3 job
+    class V,T1,T2,T3 storage
+    class NB consumer
 ```
 
 | Layer | Tables |

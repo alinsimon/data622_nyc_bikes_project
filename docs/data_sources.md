@@ -29,6 +29,14 @@ file, the 2012 to 2020 alerts, the hourly ridership and the extended weather fil
 complete hour (the Open-Meteo archive trails real time by about five days), so new months arrive without any code change. Weather uses `station_info.parquet` from the volume when it has been uploaded and the live
 GBFS station list otherwise, so the station count can differ slightly from the historical export.
 
+**Weather time zone.** Weather is requested from Open-Meteo in UTC and converted to New York clock time in
+`src/citibike/transformations.py` (`utc_weather_to_new_york`). The API's own `timezone=America/New_York` option applies the
+UTC offset of the day of the request to the whole series, so files fetched before November 21, 2026 were one hour off in every
+month on the other side of daylight saving time (the October download in standard time months, the November download in
+summer months). The weather files were rebuilt on November 21, 2026 with `refresh_weather = true`; the previous files are kept
+in `weather_backup_before_utc_fix/` in the volume. On the night clocks fall back the repeated hour holds the mean temperature
+and the summed precipitation; the hour skipped when clocks spring forward holds an interpolated temperature and no precipitation.
+
 Not collected by the jobs: `station_status/` and `station_info.parquet` (a manual BigQuery and Spark export, uploaded to the volume once) and
 the MTA Weekender closure windows, which are defined in [`src/citibike/study.py`](../src/citibike/study.py).
 
