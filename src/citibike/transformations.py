@@ -1,7 +1,7 @@
 """pandas functions that turn cleaned inputs into the analysis tables.
 
 They reproduce sections 2.1 to 2.6 of "Citi Bike Demand Analysis" step by step and are used both by
-``jobs/citibike_prepare.py`` (which saves the results as Delta tables) and by the analysis notebook (for the
+``jobs/citibike_prepare.py`` (which saves the results as Delta tables) and by the project notebooks (for the
 small lookups it rebuilds on the fly). None of them reads or writes files.
 """
 
@@ -115,6 +115,42 @@ def as_distance_band(values: pd.Series) -> pd.Series:
     return pd.Categorical(values, categories=study.DISTANCE_BANDS, ordered=True)
 
 
+def greenpoint_g_stop_distances(greenpoint_stations, g_stops) -> pd.DataFrame:
+    """Distance from every Greenpoint station to every G stop, with the quarter mile flag."""
+    pairs = greenpoint_stations[["station_id", "lat", "lon"]].drop_duplicates("station_id").merge(
+        g_stops[["gtfs_stop_id", "stop_name", "gtfs_latitude", "gtfs_longitude"]], how="cross"
+    )
+    pairs["distance_km"] = haversine_km(pairs["lat"], pairs["lon"], pairs["gtfs_latitude"], pairs["gtfs_longitude"])
+    pairs["within_quarter_mile"] = pairs["distance_km"] <= study.QUARTER_MILE_KM
+    return pairs
+
+
+def g_service_events(live_alerts: dict, exposed_stop_ids) -> pd.DataFrame:
+    """G train alerts of the live MTA feed snapshot: one row per alert and active period (times in UTC)."""
+    exposed_stop_ids = set(exposed_stop_ids)
+    rows = []
+    for entity in live_alerts["entity"]:
+        alert = entity["alert"]
+        informed = alert.get("informed_entity", [])
+        if not any(item.get("route_id") == "G" for item in informed):
+            continue
+        stops = sorted({item["stop_id"] for item in informed if item.get("route_id") == "G" and item.get("stop_id")})
+        translations = alert.get("header_text", {}).get("translation", [{}])
+        mercury = alert.get("transit_realtime.mercury_alert", {})
+        for period in alert.get("active_period", []):
+            rows.append({
+                "alert_id": entity["id"],
+                "alert_type": mercury.get("alert_type"),
+                "start_utc": pd.to_datetime(period["start"], unit="s", utc=True),
+                "end_utc": pd.to_datetime(period["end"], unit="s", utc=True) if period.get("end") else pd.NaT,
+                "g_stop_count": len(stops),
+                "g_stop_ids": ";".join(stops),
+                "touches_greenpoint_stops": bool(exposed_stop_ids.intersection(stops)),
+                "header": translations[0].get("text"),
+            })
+    return pd.DataFrame(rows).sort_values("start_utc").reset_index(drop=True)
+
+
 def station_sets(station_info, greenpoint_stations, g_stops) -> StationSets:
     """Corridor stations (Greenpoint screen or within a quarter mile of a G stop) and a seeded control sample."""
     all_stations = station_info.loc[
@@ -148,18 +184,25 @@ def station_sets(station_info, greenpoint_stations, g_stops) -> StationSets:
 # G service reductions
 # ----------------------------------------------------------------------------------------------------------------
 
-def infer_reduction_windows(g_ridership: pd.DataFrame) -> RidershipCheck:
-    """Windows where both detector stations keep under 35 percent of their typical ridership for 3+ hours."""
+def ridership_ratios(g_ridership: pd.DataFrame):
+    """Hourly ridership by G station complex (wide) and, for the detector stations, the ratio to their typical level
+    for the same weekday and hour. Returns (ridership_wide, ratio)."""
     ridership_wide = g_ridership.pivot_table(
         index="transit_timestamp", columns="station_complex", values="ridership", aggfunc="sum"
     )
-    holidays = set(pd.to_datetime(study.RIDERSHIP_HOLIDAYS).date)
     hour_keys = [ridership_wide.index.dayofweek, ridership_wide.index.hour]
     ratio = pd.DataFrame({
         station: ridership_wide[station]
         / ridership_wide[station].groupby(hour_keys).transform("median").replace(0, np.nan)
         for station in study.DETECTOR_STATIONS
     })
+    return ridership_wide, ratio
+
+
+def infer_reduction_windows(g_ridership: pd.DataFrame) -> RidershipCheck:
+    """Windows where both detector stations keep under 35 percent of their typical ridership for 3+ hours."""
+    ridership_wide, ratio = ridership_ratios(g_ridership)
+    holidays = set(pd.to_datetime(study.RIDERSHIP_HOLIDAYS).date)
     low = (
         (ratio.max(axis=1) < study.RIDERSHIP_THRESHOLD)
         & (ridership_wide.index.hour >= 6)
@@ -295,6 +338,20 @@ def utc_weather_to_new_york(frame: pd.DataFrame, start=None, end=None) -> pd.Dat
     if end is not None:
         hours = hours[hours["time"] < pd.Timestamp(end).normalize() + pd.Timedelta(days=1)]
     return hours.reset_index(drop=True)
+
+
+def greenpoint_status_frame(station_status_hourly, greenpoint_stations) -> pd.DataFrame:
+    """Hourly status of the Greenpoint stations with station attributes and calendar labels (hour, weekday, day type)."""
+    status = station_status_hourly.loc[
+        station_status_hourly["station_id"].isin(greenpoint_stations["station_id"].dropna())
+    ].merge(
+        greenpoint_stations[["station_id", "name", "lat", "lon", "capacity"]],
+        on="station_id", how="left", validate="many_to_one",
+    )
+    status["hour_of_day"] = status["hour"].dt.hour
+    status["weekday"] = status["hour"].dt.day_name()
+    status["day_type"] = status["hour"].dt.dayofweek.map(lambda day: "Weekend" if day >= 5 else "Weekday")
+    return status
 
 
 def combine_weather(greenpoint_weather, extended_weather) -> pd.DataFrame:

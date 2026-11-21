@@ -29,6 +29,14 @@ file, the 2012 to 2020 alerts, the hourly ridership and the extended weather fil
 complete hour (the Open-Meteo archive trails real time by about five days), so new months arrive without any code change. Weather uses `station_info.parquet` from the volume when it has been uploaded and the live
 GBFS station list otherwise, so the station count can differ slightly from the historical export.
 
+**Weather time zone.** Weather is requested from Open-Meteo in UTC and converted to New York clock time in
+`src/citibike/transformations.py` (`utc_weather_to_new_york`). The API's own `timezone=America/New_York` option applies the
+UTC offset of the day of the request to the whole series, so files fetched before November 21, 2026 were one hour off in every
+month on the other side of daylight saving time (the October download in standard time months, the November download in
+summer months). The weather files were rebuilt on November 21, 2026 with `refresh_weather = true`; the previous files are kept
+in `weather_backup_before_utc_fix/` in the volume. On the night clocks fall back the repeated hour holds the mean temperature
+and the summed precipitation; the hour skipped when clocks spring forward holds an interpolated temperature and no precipitation.
+
 Not collected by the jobs: `station_status/` and `station_info.parquet` (a manual BigQuery and Spark export, uploaded to the volume once) and
 the MTA Weekender closure windows, which are defined in [`src/citibike/study.py`](../src/citibike/study.py).
 
@@ -166,13 +174,15 @@ status feed provides live status, not the historical snapshots used here.
 
 ## Analysis tables
 
-Built by `citibike-prepare` with the functions in `src/citibike/transformations.py` (sections 2.1 to 2.6 of the analysis notebook).
+Built by `citibike-prepare` with the functions in `src/citibike/transformations.py` (sections 2.1 to 2.6, documented in `notebooks/analysis/01_data_preparation.ipynb`).
 Before the move to Databricks these were files in `datasource/processed/`.
 
 - `analysis_station_hour_panel`: station by hour panel (trips, status, weather, exposure, closure flags).
 - `greenpoint_station_exposure`: station distance to the nearest affected G stop and exposure band.
 - `g_service_closures_confirmed`: G closure windows from MTA Weekender notices (no G trains between Court Sq and Bedford-Nostrand Avs, 22:00 Friday to 04:00 Monday): [Aug 7 to 10](https://www.mta.info/article/mta-weekender-august-7-10-2026), [Aug 21 to 24](https://www.mta.info/article/mta-weekender-august-21-24-2026), [Sep 11 to 14](https://www.mta.info/article/mta-weekender-september-11-14-2026), [Sep 25 to 28](https://www.mta.info/article/mta-weekender-september-25-28-2026). The Labor Day weekend notice lists no G work.
 - `g_service_reduction_windows_inferred`: closure windows inferred from G ridership, used only as a check on the confirmed windows.
+- `greenpoint_station_g_stop_distances`: distance from every Greenpoint station to every G stop, with the quarter mile flag.
+- `mta_g_service_events`: G alerts of the live MTA feed snapshot, one row per alert and active period.
 - `data_quality_checks`: the checks recorded by the latest `citibike-prepare` run.
 
 ## Extended trip months and weather (downloaded once)
@@ -246,5 +256,9 @@ than verified notice details. 2024 closure dates still need a source.
 | `analysis_station_hour_panel_extended` | Station hour panel with weather, calendar, shutdown and placebo flags, four week baseline, normal profile, chronological split and status derived proxy |
 | `baseline_accuracy_by_month` | MAE and Poisson deviance of the baseline by month and station group |
 | `shutdown_effect_screening` | Actual to profile ratios at exposed and control stations by event type |
+| `trip_hourly_model_stations` | Hourly departures and arrivals per model station and trip file month, the 14 study months |
+| `shutdown_events` | One row per shutdown event with its window and affected G stops |
+| `model_station_g_stop_distances` | Distance from every model station to every G stop |
+| `status_proxy_check` | Agreement of the status derived demand proxy with trip net flow |
 
 Limits: the 2024 phase dates come from the MTA notice text and use whole days; 3 of the 16 closure weekends named in the proposal were not found in MTA notices; eight pre August 2026 weekends use assumed times.
