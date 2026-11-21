@@ -51,6 +51,12 @@ CLEAN_TABLES = frozenset({
     "baseline_accuracy_by_month",
     "shutdown_effect_screening",
     "data_quality_checks",
+    "trip_hourly_model_stations",
+    "greenpoint_station_g_stop_distances",
+    "mta_g_service_events",
+    "shutdown_events",
+    "model_station_g_stop_distances",
+    "status_proxy_check",
 })
 TABLES = RAW_TABLES | CLEAN_TABLES
 

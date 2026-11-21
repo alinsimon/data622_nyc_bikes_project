@@ -3,8 +3,8 @@
 # MAGIC # Citi Bike data preparation
 # MAGIC
 # MAGIC Turns the raw files in the volume into Delta tables, ready to analyse. It reproduces the cleaning and table
-# MAGIC building of the analysis notebook (sections 2.1 to 2.6) without the figures. The study logic lives in
-# MAGIC `src/citibike/transformations.py`, which the analysis notebook also uses.
+# MAGIC building documented in `notebooks/analysis/01_data_preparation.ipynb` (sections 2.1 to 2.6). The study logic
+# MAGIC lives in `src/citibike/transformations.py`, which both project notebooks also use.
 # MAGIC
 # MAGIC **Raw tables** (one per reference file in the volume, values unchanged, column names in snake case):
 # MAGIC `raw_station_info`, `raw_mta_subway_stations`, `raw_mta_subway_alerts_2026`, `raw_mta_g_alerts_2012_2020`,
@@ -31,6 +31,12 @@
 # MAGIC | `analysis_station_hour_panel_extended` | station by hour, 2024 and 2026 | **main modeling table** |
 # MAGIC | `baseline_accuracy_by_month` | month by station group | baseline errors |
 # MAGIC | `shutdown_effect_screening` | event by station group | actual to profile demand ratios (Figure 10) |
+# MAGIC | `trip_hourly_model_stations` | model station by trip file month by hour | `trips` (Sections 2.1 and 2.6) |
+# MAGIC | `greenpoint_station_g_stop_distances` | Greenpoint station by G stop | stations and G stops |
+# MAGIC | `mta_g_service_events` | G alert by active period | live MTA alert feed snapshot |
+# MAGIC | `shutdown_events` | shutdown event | closure notices and 2024 phases |
+# MAGIC | `model_station_g_stop_distances` | model station by G stop | model stations and G stops |
+# MAGIC | `status_proxy_check` | check | agreement of the status proxy with trip net flow |
 # MAGIC | `data_quality_checks` | check | results of this run |
 # MAGIC
 # MAGIC * **Incremental trips.** A trip month is loaded only when it is new or its CSV files changed size, so a weekly
@@ -154,7 +160,7 @@ print("Tables written to:", f"{CATALOG}.{SCHEMA}")
 # MAGIC %md
 # MAGIC ## 1. Trips
 # MAGIC
-# MAGIC Cleaning rules (section 2.3 of the analysis notebook):
+# MAGIC Cleaning rules (section 2.3 of `01_data_preparation.ipynb`):
 # MAGIC * station codes are kept as strings, so codes such as `4665.02` keep their exact form;
 # MAGIC * trips with a missing or unreadable start or end time, or an end time at or before the start, are dropped;
 # MAGIC * trips without a start or end station are kept, because the other end can still be counted;
@@ -410,6 +416,15 @@ mta_g_stops["affected_segment"] = mta_g_stops["gtfs_stop_id"].isin(segment_stop_
 check("mta", "G train stops", len(mta_g_stops))
 save_pandas(mta_g_stops, "mta_g_stops", "Subway stops served by the G train, with the 2026 affected segment flag.")
 
+greenpoint_stop_distances = tf.greenpoint_g_stop_distances(greenpoint_stations, mta_g_stops)
+save_pandas(greenpoint_stop_distances, "greenpoint_station_g_stop_distances",
+            "Distance from every Greenpoint station to every G stop, with the quarter mile flag (Section 2.1).")
+exposed_stop_ids = set(greenpoint_stop_distances.loc[greenpoint_stop_distances["within_quarter_mile"], "gtfs_stop_id"])
+g_service_events = tf.g_service_events(json.loads(live_alert_text), exposed_stop_ids)
+check("mta", "G service event periods in the live alert snapshot", len(g_service_events))
+save_pandas(g_service_events, "mta_g_service_events",
+            "G train alerts from the live MTA feed snapshot, one row per alert and active period. Times are UTC.")
+
 greenpoint_weather = raw["raw_greenpoint_weather_hourly_2026"]
 weather_all = tf.combine_weather(greenpoint_weather, raw["raw_greenpoint_weather_hourly_extended"])
 check("weather", "Hourly weather rows", len(weather_all))
@@ -447,12 +462,52 @@ save_pandas(station_exposure, "greenpoint_station_exposure",
 sets = tf.station_sets(station_info, greenpoint_stations, mta_g_stops)
 model_stations = sets.model_stations
 
-# Hourly trips for the model stations (replaces the chunked CSV pass of the local notebook)
+# Hourly trips for the model stations, counted per trip file month like the CSV pass of the local notebook
+# (arrivals early in the next month stay with the file they came from). Section 2.1 uses the January, August and
+# September 2026 files and Section 2.6 all fourteen study months.
 model_codes = [str(code) for code in model_stations["short_name"]]
-trip_hourly = spark.table(fq("trips_station_hourly")).where(F.col("short_name").isin(model_codes)).toPandas()
+study_trips = spark.table(fq("trips")).where(F.col("trip_month").isin(list(study.EXTENDED_MONTHS)))
+
+
+def monthly_hourly_flow(station_column, time_column, name):
+    return (
+        study_trips.where(F.col(station_column).isin(model_codes))
+        .groupBy(F.col(station_column).alias("short_name"), "trip_month",
+                 F.date_trunc("hour", F.col(time_column).cast("timestamp")).alias("hour"))
+        .agg(F.count(F.lit(1)).alias(name))
+    )
+
+
+save_spark(
+    to_ntz(
+        monthly_hourly_flow("start_station_id", "started_at", "departures")
+        .join(monthly_hourly_flow("end_station_id", "ended_at", "arrivals"), ["short_name", "trip_month", "hour"], "full")
+        .fillna(0, ["departures", "arrivals"])
+    ),
+    "trip_hourly_model_stations",
+    "Departures and arrivals per model station, trip file month and New York clock hour, for the 14 study months.",
+)
+trip_hourly = (
+    spark.table(fq("trip_hourly_model_stations")).groupBy("short_name", "hour")
+    .agg(F.sum("departures").alias("departures"), F.sum("arrivals").alias("arrivals")).toPandas()
+)
 trip_hourly["short_name"] = trip_hourly["short_name"].astype(str)
 trip_hourly["hour"] = pd.to_datetime(trip_hourly["hour"]).astype("datetime64[ns]")
 trip_hourly[["departures", "arrivals"]] = trip_hourly[["departures", "arrivals"]].astype("int64")
+check("trips", "Model station hours with trips (14 study months)", f"{len(trip_hourly):,}")
+
+# Trip station codes of the Section 2.1 months that are missing from the latest station crosswalk
+section_21_trips = spark.table(fq("trips")).where(F.col("trip_month").isin(list(study.TRIP_MONTHS)))
+trip_codes = {
+    row["code"] for row in
+    section_21_trips.select(F.col("start_station_id").alias("code"))
+    .union(section_21_trips.select(F.col("end_station_id").alias("code")))
+    .where(F.col("code").isNotNull()).distinct().collect()
+}
+months_label = ", ".join(study.TRIP_MONTHS)
+check("trips", f"Distinct trip station IDs ({months_label})", len(trip_codes))
+check("trips", f"Trip station IDs absent from latest station crosswalk ({months_label})",
+      len(trip_codes - set(station_info["short_name"].dropna())))
 
 greenpoint_trips = trip_hourly[trip_hourly["short_name"].isin(greenpoint_trip_ids)].merge(
     greenpoint_stations[["station_id", "trip_station_id"]].assign(trip_station_id=lambda f: f["trip_station_id"].astype(str)),
@@ -488,6 +543,10 @@ save_pandas(mta_subway_shutdowns, "mta_subway_shutdowns",
             "Shutdown table: one row per event and affected G stop, with Citi Bike stations within a quarter mile.")
 save_pandas(model_stations, "model_station_sets",
             "Model stations: station_group corridor or control, and distance to the nearest G stop. Maps short_name to station_id.")
+save_pandas(shutdown_events, "shutdown_events",
+            "One row per shutdown event (13 confirmed 2026 closure weekends and three 2024 phases) with its affected G stops.")
+save_pandas(sets.model_pairs, "model_station_g_stop_distances",
+            "Distance in miles from every model station to every G stop.")
 
 stations = station_info.merge(
     sets.all_stations[["short_name", "miles_to_nearest_g_stop", "station_group"]], on="short_name", how="left"
@@ -516,6 +575,12 @@ baseline_accuracy = tf.baseline_accuracy(panel_extended)
 save_pandas(baseline_accuracy, "baseline_accuracy_by_month",
             "Mean absolute error and Poisson deviance of the four week baseline by month and station group.")
 display(baseline_accuracy.round(3))
+
+proxy_check = tf.proxy_check_table(tf.status_proxy_frame(panel_extended))
+proxy_check["Result"] = proxy_check["Result"].astype(float)
+save_pandas(proxy_check, "status_proxy_check",
+            "How well the change in bikes available tracks trip net flow (Section 2.6 status proxy check).")
+display(proxy_check)
 
 event_effect_table = tf.shutdown_effect_screening(panel_extended)
 save_pandas(event_effect_table, "shutdown_effect_screening",

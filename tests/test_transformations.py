@@ -197,3 +197,41 @@ def test_status_proxies_use_contiguous_hours_only():
     assert np.isnan(status["bikes_change"].iloc[2])  # 12:00 is missing, so 13:00 has no change
     merged = tf.add_status_proxies(pe)
     assert len(merged) == 3 and "status_net_proxy" in merged
+
+
+def test_greenpoint_g_stop_distances_flags_quarter_mile():
+    stations = pd.DataFrame({"station_id": ["near", "far"], "lat": [40.7312, 40.7400], "lon": [-73.9540, -73.9700]})
+    pairs = tf.greenpoint_g_stop_distances(stations, _g_stops())
+    assert len(pairs) == 2 * len(_g_stops())
+    near_stops = set(pairs.loc[pairs["within_quarter_mile"], "station_id"])
+    assert near_stops == {"near"}
+
+
+def test_g_service_events_parses_g_alerts_only():
+    feed = {"entity": [
+        {"id": "a1", "alert": {
+            "informed_entity": [{"route_id": "G", "stop_id": "G26"}, {"route_id": "G", "stop_id": "G22"}],
+            "active_period": [{"start": 1792942944, "end": 1792950000}, {"start": 1793000000}],
+            "header_text": {"translation": [{"text": "No G trains"}]},
+            "transit_realtime.mercury_alert": {"alert_type": "Planned - Part Suspended"}}},
+        {"id": "a2", "alert": {"informed_entity": [{"route_id": "A"}], "active_period": [{"start": 1792942944}]}},
+    ]}
+    events = tf.g_service_events(feed, exposed_stop_ids={"G26"})
+    assert len(events) == 2
+    assert events["alert_id"].unique().tolist() == ["a1"]
+    assert events["g_stop_ids"].iloc[0] == "G22;G26"
+    assert events["touches_greenpoint_stops"].all()
+    assert events["end_utc"].isna().sum() == 1
+    assert str(events["start_utc"].dt.tz) == "UTC"
+
+
+def test_greenpoint_status_frame_adds_attributes_and_calendar():
+    status = pd.DataFrame({"station_id": ["a", "a", "z"],
+                           "hour": pd.to_datetime(["2026-08-22 08:00", "2026-08-24 17:00", "2026-08-22 08:00"]),
+                           "snapshot_count": [12, 12, 12]})
+    stations = pd.DataFrame({"station_id": ["a"], "name": ["A"], "lat": [40.73], "lon": [-73.95], "capacity": [20]})
+    frame = tf.greenpoint_status_frame(status, stations)
+    assert frame["station_id"].tolist() == ["a", "a"]          # stations outside the screen are dropped
+    assert frame["day_type"].tolist() == ["Weekend", "Weekday"]
+    assert frame["hour_of_day"].tolist() == [8, 17]
+    assert frame["name"].eq("A").all()
