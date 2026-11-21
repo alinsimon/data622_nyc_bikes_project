@@ -1,23 +1,35 @@
 # Databricks Asset Bundle for the Citi Bike project.
 #
-# Two ways to deploy:
-#   * In the workspace: open this file in your Git folder and use the Deployments panel (rocket icon).
-#   * From your computer: `databricks bundle deploy -t prod`, then `databricks bundle run citibike_download -t prod`
-#     (trip archives) or `databricks bundle run external_data_download -t prod` (MTA, weather and GBFS data).
+# Jobs are defined in resources/*.job.yml and run the notebooks in jobs/:
+#   citibike_download       weekly: monthly trip archives, then starts citibike_prepare
+#   external_data_download  daily: MTA, weather and GBFS sources
+#   citibike_prepare        cleans the raw files into the Delta tables in ${var.catalog}.${var.schema}
 #
-# Targets:
-#   dev  -> for testing. Job names get a "[dev <you>]" prefix and the schedule is PAUSED.
-#   prod -> the real scheduled job. The schedule is ACTIVE.
+# Deploy and run from your computer:
+#   databricks bundle validate
+#   databricks bundle deploy            (dev target: job names get a "[dev <you>]" prefix, schedules PAUSED)
+#   databricks bundle deploy -t prod    (prod target: schedules ACTIVE)
+#   databricks bundle run citibike_prepare [-t prod]
+# or from the workspace: open this file in your Git folder and use the Deployments panel (rocket icon).
 
 bundle:
   name: citibike-ingest
+
+include:
+  - resources/*.yml
+
+# Only code is uploaded. Data lives in the volume and tables, and local environments stay local.
+sync:
+  exclude:
+    - datasource/**
+    - .venv/**
 
 variables:
   catalog:
     description: Unity Catalog catalog for the raw data (Free Edition uses "workspace").
     default: workspace
   schema:
-    description: Schema that holds the volume.
+    description: Schema that holds the volume and the tables.
     default: citibike
   volume:
     description: Volume where archives and CSVs are stored.
@@ -26,155 +38,19 @@ variables:
     description: Address for failure and slow-run alerts.
     default: ${workspace.current_user.userName}
 
-resources:
-  jobs:
-    citibike_download:
-      name: citibike-download
-      description: >
-        Downloads monthly Citi Bike trip archives into
-        /Volumes/${var.catalog}/${var.schema}/${var.volume}/datasource
-        and picks up newly published months automatically.
-      tags:
-        project: data622_nyc_bikes
-        layer: raw
-
-      # Every Monday 06:00 New York time. Citi Bike publishes a month early in the following month;
-      # on weeks with nothing new the run only checks file sizes and finishes in a few minutes.
-      schedule:
-        quartz_cron_expression: "0 0 6 ? * MON"
-        timezone_id: America/New_York
-
-      max_concurrent_runs: 1
-      queue:
-        enabled: true          # a manual run started during a scheduled one waits instead of failing
-      timeout_seconds: 10800   # hard stop after 3 hours
-
-      # Job parameters can be changed for a single run with "Run now with different parameters".
-      parameters:
-        - name: catalog
-          default: ${var.catalog}
-        - name: schema
-          default: ${var.schema}
-        - name: volume
-          default: ${var.volume}
-        - name: extra_months
-          default: ""
-        - name: discover_new_months
-          default: "true"
-        - name: lookback_months
-          default: "3"
-        - name: max_parallel
-          default: "3"
-
-      email_notifications:
-        on_failure:
-          - ${var.notify_email}
-        on_duration_warning_threshold_exceeded:
-          - ${var.notify_email}
-        no_alert_for_skipped_runs: true
-
-      # Warn if a run takes longer than 1 hour (a normal weekly run takes minutes).
-      health:
-        rules:
-          - metric: RUN_DURATION_SECONDS
-            op: GREATER_THAN
-            value: 3600
-
-      tasks:
-        - task_key: download
-          # No cluster is set, so the task runs on serverless compute (the only option on Free Edition).
-          notebook_task:
-            notebook_path: ./citibike_download.py
-          max_retries: 2
-          min_retry_interval_millis: 600000   # wait 10 minutes before retrying
-          retry_on_timeout: true
-          timeout_seconds: 7200
-
-        # Optional: rerun the analysis only when new months arrived.
-        # Uncomment once station_info.parquet and the station_status folder have been uploaded to the volume
-        # (they are manual exports), and add the weekly job's task as a dependency if both should run together.
-        #
-        # - task_key: has_new_months
-        #   depends_on:
-        #     - task_key: download
-        #   condition_task:
-        #     op: NOT_EQUAL
-        #     left: "{{tasks.download.values.new_months}}"
-        #     right: "[]"
-        #
-        # - task_key: analysis
-        #   depends_on:
-        #     - task_key: has_new_months
-        #       outcome: "true"
-        #   notebook_task:
-        #     notebook_path: "./Citi Bike Demand Analysis - Databricks.ipynb"
-        #   timeout_seconds: 7200
-
-    external_data_download:
-      name: external-data-download
-      description: >
-        Downloads the MTA, Open-Meteo and GBFS sources used by "Citi Bike Demand Analysis" into
-        /Volumes/${var.catalog}/${var.schema}/${var.volume}/datasource under the file names the notebook uses.
-        Alert and incident tables are refreshed; the live MTA alert feed and GBFS station feeds are archived
-        with a timestamp on every run; the remaining sources are downloaded once.
-      tags:
-        project: data622_nyc_bikes
-        layer: raw
-
-      # Every day 05:00 New York time. The live MTA alert feed only holds current and future work, so a
-      # daily snapshot is what builds the alert history. One-time sources are skipped after the first run.
-      schedule:
-        quartz_cron_expression: "0 0 5 * * ?"
-        timezone_id: America/New_York
-
-      max_concurrent_runs: 1
-      queue:
-        enabled: true
-      timeout_seconds: 3600
-
-      parameters:
-        - name: catalog
-          default: ${var.catalog}
-        - name: schema
-          default: ${var.schema}
-        - name: volume
-          default: ${var.volume}
-        - name: alerts_start
-          default: "2026-01-01"
-        - name: force_refresh
-          default: "false"
-
-      email_notifications:
-        on_failure:
-          - ${var.notify_email}
-        on_duration_warning_threshold_exceeded:
-          - ${var.notify_email}
-        no_alert_for_skipped_runs: true
-
-      health:
-        rules:
-          - metric: RUN_DURATION_SECONDS
-            op: GREATER_THAN
-            value: 1800
-
-      tasks:
-        - task_key: download
-          notebook_task:
-            notebook_path: ./external_data_download.py
-          max_retries: 2
-          min_retry_interval_millis: 300000   # wait 5 minutes before retrying
-          retry_on_timeout: true
-          timeout_seconds: 3000
-
 targets:
   dev:
     mode: development
     default: true
-    # The workspace host comes from your CLI profile or DATABRICKS_HOST, so it is not hard-coded here.
+    workspace:
+      host: https://dbc-26363ad8-a42a.cloud.databricks.com
+      profile: dev
 
   prod:
     mode: production
     workspace:
+      host: https://dbc-26363ad8-a42a.cloud.databricks.com
+      profile: dev
       root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
     run_as:
       user_name: ${workspace.current_user.userName}

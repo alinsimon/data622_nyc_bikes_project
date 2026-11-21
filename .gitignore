@@ -1,1 +1,34 @@
-/datasource/*.zip
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp
+
+# Local credentials and environment variables (Databricks authentication lives in ~/.databrickscfg)
+.env
+.env.*
+.databrickscfg
+
+# Databricks local state (VS Code extension and CLI)
+.databricks/
+
+# Data: the raw files live in the Databricks volume and the cleaned data in Delta tables.
+# A local datasource/ folder is only a personal copy and is never committed.
+datasource/
+*.zip
+*.pkl

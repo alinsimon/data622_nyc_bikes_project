@@ -12,6 +12,10 @@
 # MAGIC | Snapshots | live MTA alert feed, GBFS station information and status | A dated copy is added to an archive folder each run, which builds the history the live feeds do not keep. The undated "latest" file is written only if missing, so the analysis inputs do not change under it |
 # MAGIC | One time | MTA stations, 2012-2020 alerts, hourly ridership, extended weather (2024 and Feb-Jul 2026) | Downloaded only when the file is missing (or `force_refresh = true`) |
 # MAGIC
+# MAGIC Weather is requested in UTC and converted to New York clock time in `src/citibike/transformations.py`, because the
+# MAGIC archive's own time zone option applies one UTC offset to the whole request and shifts half of the year by an hour.
+# MAGIC Set `refresh_weather = true` to rebuild the three weather files (and nothing else) from scratch.
+# MAGIC
 # MAGIC Each source runs on its own, so one failing API does not block the others; the run fails at the end if any source failed,
 # MAGIC which triggers the job's retry and alert settings.
 
@@ -22,6 +26,7 @@ dbutils.widgets.text("schema", "citibike", "Schema")
 dbutils.widgets.text("volume", "raw", "Volume")
 dbutils.widgets.text("alerts_start", "2026-01-01", "First date of the subway alert download (YYYY-MM-DD)")
 dbutils.widgets.dropdown("force_refresh", "false", ["true", "false"], "Re-download one-time files")
+dbutils.widgets.dropdown("refresh_weather", "false", ["true", "false"], "Rebuild the weather files")
 
 # COMMAND ----------
 
@@ -36,14 +41,26 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
+import sys
+
 import numpy as np
 import pandas as pd
+
+# Make src/ importable: walk up from this notebook to the folder that holds databricks.yml.
+REPO_ROOT = next((p for p in [Path.cwd(), *Path.cwd().parents] if (p / "databricks.yml").exists()), None)
+if REPO_ROOT is None:
+    raise FileNotFoundError("Could not find the project root (databricks.yml) above " + str(Path.cwd()))
+if str(REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "src"))
+
+from citibike.transformations import utc_weather_to_new_york
 
 CATALOG = dbutils.widgets.get("catalog").strip()
 SCHEMA = dbutils.widgets.get("schema").strip()
 VOLUME = dbutils.widgets.get("volume").strip()
 ALERTS_START = dbutils.widgets.get("alerts_start").strip()
 FORCE_REFRESH = dbutils.widgets.get("force_refresh") == "true"
+REFRESH_WEATHER = dbutils.widgets.get("refresh_weather") == "true"
 
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS `{CATALOG}`.`{SCHEMA}`")
 spark.sql(f"CREATE VOLUME IF NOT EXISTS `{CATALOG}`.`{SCHEMA}`.`{VOLUME}`")
@@ -277,32 +294,38 @@ def greenpoint_stations():
     return stations
 
 
+def utc_request_dates(start_date, end_date):
+    """UTC dates that cover New York dates start_date to end_date (New York runs 4 or 5 hours behind UTC)."""
+    return (pd.Timestamp(start_date).strftime("%Y-%m-%d"),
+            (pd.Timestamp(end_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d"))
+
+
 def fetch_hourly(latitude, longitude, start_date, end_date):
-    """Hourly temperature and precipitation for one weather grid cell, in New York local time."""
+    """Hourly temperature and precipitation for one weather grid cell, in New York clock time."""
+    utc_start, utc_end = utc_request_dates(start_date, end_date)
     response = fetch_json(WEATHER_ENDPOINT, {
         "latitude": latitude,
         "longitude": longitude,
-        "start_date": pd.Timestamp(start_date).strftime("%Y-%m-%d"),
-        "end_date": pd.Timestamp(end_date).strftime("%Y-%m-%d"),
+        "start_date": utc_start,
+        "end_date": utc_end,
         "hourly": "temperature_2m,precipitation",
-        "timezone": "America/New_York",
+        "timezone": "GMT",
     })
-    frame = pd.DataFrame(response["hourly"])
-    frame["time"] = pd.to_datetime(frame["time"])
-    return frame
+    return utc_weather_to_new_york(pd.DataFrame(response["hourly"]), start=start_date, end=end_date)
 
 
 def build_station_weather(lookup_path, weather_path):
     stations = greenpoint_stations()
     lookup_records, weather_parts = [], []
     for month, (start_date, end_date) in WEATHER_MONTHS.items():
+        utc_start, utc_end = utc_request_dates(start_date, end_date)
         responses = fetch_json(WEATHER_ENDPOINT, {
             "latitude": ",".join(stations["lat"].astype(str)),
             "longitude": ",".join(stations["lon"].astype(str)),
-            "start_date": start_date,
-            "end_date": end_date,
+            "start_date": utc_start,
+            "end_date": utc_end,
             "hourly": "temperature_2m,precipitation",
-            "timezone": "America/New_York",
+            "timezone": "GMT",
             "cell_selection": "land",
             "elevation": ",".join(["nan"] * len(stations)),
         })
@@ -324,8 +347,7 @@ def build_station_weather(lookup_path, weather_path):
             hourly = response.get("hourly")
             if not hourly or not hourly.get("time"):
                 raise ValueError(f"Weather API returned no hourly records for {month}.")
-            part = pd.DataFrame(hourly)
-            part["time"] = pd.to_datetime(part["time"], errors="raise")
+            part = utc_weather_to_new_york(pd.DataFrame(hourly), start=start_date, end=end_date)
             part["month"] = month
             part["weather_cell_id"] = cell_id
             part["weather_latitude"] = response["latitude"]
@@ -395,14 +417,14 @@ def greenpoint_weather():
     weather_path = DATA_DIR / "greenpoint_weather_hourly_2026.csv"
     extended_path = DATA_DIR / "greenpoint_weather_hourly_extended.csv"
     notes = []
-    if is_missing(lookup_path) or is_missing(weather_path):
+    if REFRESH_WEATHER or is_missing(lookup_path) or is_missing(weather_path):
         stations, rows = build_station_weather(lookup_path, weather_path)
         notes.append(f"seeded {stations} stations, {rows:,} hourly rows")
     lookup = pd.read_csv(lookup_path)
     added = extend_station_weather(lookup, weather_path)
     latest = pd.read_csv(weather_path, parse_dates=["time"])["time"].max()
     notes.append(f"added {added:,} new hourly rows, data through {latest:%Y-%m-%d %H:%M}")
-    if is_missing(extended_path):
+    if REFRESH_WEATHER or is_missing(extended_path):
         notes.append(f"extended weather: {build_extended_weather(lookup.iloc[0], extended_path):,} hourly rows")
     return "; ".join(notes)
 

@@ -1,0 +1,78 @@
+# Weekly download of the monthly Citi Bike trip archives, then the citibike-prepare job.
+# Notebook paths are relative to this file.
+resources:
+  jobs:
+    citibike_download:
+      name: citibike-download
+      description: >
+        Downloads monthly Citi Bike trip archives into
+        /Volumes/${var.catalog}/${var.schema}/${var.volume}/datasource
+        and picks up newly published months automatically.
+      tags:
+        project: data622_nyc_bikes
+        layer: raw
+
+      # Every Monday 06:00 New York time. Citi Bike publishes a month early in the following month;
+      # on weeks with nothing new the run only checks file sizes and finishes in a few minutes.
+      schedule:
+        quartz_cron_expression: "0 0 6 ? * MON"
+        timezone_id: America/New_York
+
+      max_concurrent_runs: 1
+      queue:
+        enabled: true          # a manual run started during a scheduled one waits instead of failing
+      timeout_seconds: 10800   # hard stop after 3 hours
+
+      # Job parameters can be changed for a single run with "Run now with different parameters".
+      parameters:
+        - name: catalog
+          default: ${var.catalog}
+        - name: schema
+          default: ${var.schema}
+        - name: volume
+          default: ${var.volume}
+        - name: extra_months
+          default: ""
+        - name: discover_new_months
+          default: "true"
+        - name: lookback_months
+          default: "3"
+        - name: max_parallel
+          default: "3"
+
+      email_notifications:
+        on_failure:
+          - ${var.notify_email}
+        on_duration_warning_threshold_exceeded:
+          - ${var.notify_email}
+      notification_settings:
+        no_alert_for_skipped_runs: true
+
+      # Warn if a run takes longer than 1 hour (a normal weekly run takes minutes).
+      health:
+        rules:
+          - metric: RUN_DURATION_SECONDS
+            op: GREATER_THAN
+            value: 3600
+
+      tasks:
+        - task_key: download
+          # No cluster is set, so the task runs on serverless compute (the only option on Free Edition).
+          notebook_task:
+            notebook_path: ../jobs/citibike_download.py
+          max_retries: 2
+          min_retry_interval_millis: 600000   # wait 10 minutes before retrying
+          retry_on_timeout: true
+          timeout_seconds: 7200
+
+        # Rebuild the cleaned tables once the download has finished. This starts the citibike-prepare job
+        # (defined below), so the tables can also be rebuilt on their own from that job.
+        - task_key: prepare
+          depends_on:
+            - task_key: download
+          run_job_task:
+            job_id: ${resources.jobs.citibike_prepare.id}
+            job_parameters:
+              catalog: "{{job.parameters.catalog}}"
+              schema: "{{job.parameters.schema}}"
+              volume: "{{job.parameters.volume}}"
