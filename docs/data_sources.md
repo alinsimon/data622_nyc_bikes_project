@@ -1,16 +1,24 @@
 # Data sources
 
-The project stores downloaded collected data in this folder.
+All project data lives in Databricks (default catalog `workspace`, schema `citibike`):
 
-## Databricks download jobs
+* **Raw files** in the Unity Catalog volume `/Volumes/<catalog>/<schema>/<volume>/datasource` (default `workspace.citibike.raw`),
+  collected by the download jobs. The file names are the ones the original notebook used in its local `datasource/` folder.
+* **Delta tables** in the same schema, built from those files by the `citibike-prepare` job
+  ([`jobs/citibike_prepare.py`](../jobs/citibike_prepare.py)). Notebooks read the tables through
+  [`src/citibike/data_access.py`](../src/citibike/data_access.py); nothing is read from a local folder.
 
-Two jobs in [`databricks.yml`](../databricks.yml) collect the raw data into the Unity Catalog volume
-`/Volumes/<catalog>/<schema>/<volume>/datasource` (default `workspace.citibike.raw`), using the same file names as this folder.
+A local `datasource/` folder is only a personal copy and is ignored by Git.
 
-| Job | Notebook | Schedule (New York time) | Collects |
+## Jobs
+
+The jobs are defined in [`resources/`](../resources) and deployed with the bundle in [`databricks.yml`](../databricks.yml).
+
+| Job | Notebook | Schedule (New York time) | Does |
 |---|---|---|---|
-| `citibike-download` | [`citibike_download.py`](../citibike_download.py) | Mondays 06:00 | Monthly trip archives, including newly published months |
-| `external-data-download` | [`external_data_download.py`](../external_data_download.py) | Daily 05:00 | MTA alerts, delay incidents, stations and ridership, live MTA alert feed, GBFS station feeds, Open-Meteo weather |
+| `citibike-download` | [`jobs/citibike_download.py`](../jobs/citibike_download.py) | Mondays 06:00 | Downloads the monthly trip archives (including newly published months), unzips them into the volume, then starts `citibike-prepare` |
+| `external-data-download` | [`jobs/external_data_download.py`](../jobs/external_data_download.py) | Daily 05:00 | MTA alerts, delay incidents, stations and ridership, live MTA alert feed, GBFS station feeds, Open-Meteo weather |
+| `citibike-prepare` | [`jobs/citibike_prepare.py`](../jobs/citibike_prepare.py) | after each `citibike-download` run | Cleans the raw files into the Delta tables below (trip months are loaded incrementally) |
 
 `external_data_download.py` refreshes `mta_subway_alerts_2026.csv` and `mta_g_delay_incidents_monthly.csv` on every run. The live MTA alert
 feed and the GBFS station information and status feeds are archived with a timestamp in `mta_live_alerts/`, `gbfs_station_information/` and
@@ -21,14 +29,30 @@ file, the 2012 to 2020 alerts, the hourly ridership and the extended weather fil
 complete hour (the Open-Meteo archive trails real time by about five days), so new months arrive without any code change. Weather uses `station_info.parquet` from the volume when it has been uploaded and the live
 GBFS station list otherwise, so the station count can differ slightly from the historical export.
 
-Not collected by the jobs: `station_status/` and `station_info.parquet` (a manual BigQuery and Spark export) and the MTA Weekender closure
-windows, which are entered by hand in the analysis notebook. Upload the first two to the volume once.
+Not collected by the jobs: `station_status/` and `station_info.parquet` (a manual BigQuery and Spark export, uploaded to the volume once) and
+the MTA Weekender closure windows, which are defined in [`src/citibike/study.py`](../src/citibike/study.py).
 
-[`Citi Bike Demand Analysis - Databricks.ipynb`](../Citi%20Bike%20Demand%20Analysis%20-%20Databricks.ipynb) is the analysis and modeling notebook for
-Databricks. It reads everything from the volume (the trip CSVs the job has already unzipped) and downloads nothing; if a file is missing it
-stops and names the job that collects it. Outside Databricks it reads this local `datasource` folder instead.
+## Raw files and their tables
 
-Deploy and run with `databricks bundle deploy -t prod` and `databricks bundle run external_data_download -t prod`.
+| Raw file in the volume | Delta table(s) |
+|---|---|
+| `YYYYMM-citibike-tripdata/*.csv` (15 months) | `trips` (cleaned, one row per ride), `trips_ingest_log`, `trips_station_hourly` |
+| `station_status/nyc_date=*/*.parquet` | `station_status_hourly` |
+| `station_info.parquet` | `raw_station_info` (all snapshots), `stations` (latest snapshot with study attributes) |
+| `MTA_Subway_Stations_20261003.csv` | `raw_mta_subway_stations`, `mta_g_stops` |
+| `mta_subway_alerts_2026.csv` | `raw_mta_subway_alerts_2026` |
+| `mta_g_alerts_2012_2020.csv` | `raw_mta_g_alerts_2012_2020` |
+| `mta_g_delay_incidents_monthly.csv` | `raw_mta_g_delay_incidents_monthly` |
+| `mta_g_station_hourly_ridership_2026.csv` | `raw_mta_g_station_hourly_ridership_2026`, `g_service_reduction_windows_inferred` |
+| `mta_live_alerts_snapshot.json` | `raw_mta_live_alerts_snapshot` (the JSON document in one row) |
+| `greenpoint_station_weather_lookup.csv` | `raw_greenpoint_station_weather_lookup` |
+| `greenpoint_weather_hourly_2026.csv`, `greenpoint_weather_hourly_extended.csv` | `raw_greenpoint_weather_hourly_2026`, `raw_greenpoint_weather_hourly_extended`, `weather_hourly` |
+
+Not loaded into tables because the analysis does not use them: the timestamped archives `mta_live_alerts/`, `gbfs_station_information/`,
+`gbfs_station_status/` and the live `station_information.json` and `station_status.json` snapshots. They stay in the volume.
+
+The sections below record where each source comes from. Mentions of notebook cells that download or cache files describe the
+archived local notebooks in `notebooks/archive/`.
 
 ## Citi Bike trip history
 
@@ -50,7 +74,7 @@ The January archive is about 338 MB; September is about 927 MiB. The same step
 unzips them into `datasource/202601-citibike-tripdata/` and
 `datasource/202609-citibike-tripdata/`, respectively. Existing archives and
 extracted files are reused. The trip glimpse still reads January's first CSV.
-September contains the full month's trip records, including September 14â€“20.
+September contains the full month's trip records, including September 14–20.
 It does not replace the historical station-status Parquet dataset.
 
 ## MTA service alerts
@@ -140,14 +164,16 @@ Those two tables hold station records and trips; no BigQuery table was supplied
 for station status itself, so the provenance comes from the Parquet metadata: a GBFS status poller (version 1.2, run manually) exported by a Spark job on October 1, 2026, partitioned by `nyc_date` from August 21 to October 1, 2026. The original query is not recorded. The current Citi Bike GBFS station
 status feed provides live status, not the historical snapshots used here.
 
-## Analysis outputs
+## Analysis tables
 
-All tables generated by the notebook are written to `datasource/processed/`. The raw downloads and API caches stay in `datasource/`.
+Built by `citibike-prepare` with the functions in `src/citibike/transformations.py` (sections 2.1 to 2.6 of the analysis notebook).
+Before the move to Databricks these were files in `datasource/processed/`.
 
-- analysis_station_hour_panel.parquet: station by hour panel (trips, status, weather, exposure, closure flags).
-- greenpoint_station_exposure.csv: station distance to the nearest affected G stop and exposure band.
-- g_service_closures_confirmed.csv: G closure windows from MTA Weekender notices (no G trains between Court Sq and Bedford-Nostrand Avs, 22:00 Friday to 04:00 Monday): [Aug 7 to 10](https://www.mta.info/article/mta-weekender-august-7-10-2026), [Aug 21 to 24](https://www.mta.info/article/mta-weekender-august-21-24-2026), [Sep 11 to 14](https://www.mta.info/article/mta-weekender-september-11-14-2026), [Sep 25 to 28](https://www.mta.info/article/mta-weekender-september-25-28-2026). The Labor Day weekend notice lists no G work.
-- g_service_reduction_windows_inferred.csv: closure windows inferred from G ridership, used only as a check on the confirmed windows.
+- `analysis_station_hour_panel`: station by hour panel (trips, status, weather, exposure, closure flags).
+- `greenpoint_station_exposure`: station distance to the nearest affected G stop and exposure band.
+- `g_service_closures_confirmed`: G closure windows from MTA Weekender notices (no G trains between Court Sq and Bedford-Nostrand Avs, 22:00 Friday to 04:00 Monday): [Aug 7 to 10](https://www.mta.info/article/mta-weekender-august-7-10-2026), [Aug 21 to 24](https://www.mta.info/article/mta-weekender-august-21-24-2026), [Sep 11 to 14](https://www.mta.info/article/mta-weekender-september-11-14-2026), [Sep 25 to 28](https://www.mta.info/article/mta-weekender-september-25-28-2026). The Labor Day weekend notice lists no G work.
+- `g_service_reduction_windows_inferred`: closure windows inferred from G ridership, used only as a check on the confirmed windows.
+- `data_quality_checks`: the checks recorded by the latest `citibike-prepare` run.
 
 ## Extended trip months and weather (downloaded once)
 
@@ -171,7 +197,7 @@ about 9 GB. Download them directly from Citi Bike's public S3 trip-data archive:
 The archive URL pattern is
 `https://s3.amazonaws.com/tripdata/YYYYMM-citibike-tripdata.zip`. To fetch and
 extract all required months automatically, run the `download-trip-data` cell in
-[`Citi Bike Demand Analysis.ipynb`](../Citi%20Bike%20Demand%20Analysis.ipynb)
+[`Citi Bike Demand Analysis.ipynb`](../notebooks/archive/Citi%20Bike%20Demand%20Analysis.ipynb) (archived local version)
 from the project root. It saves each ZIP as
 `datasource/YYYYMM-citibike-tripdata.zip` and extracts its CSV files into
 `datasource/YYYYMM-citibike-tripdata/`. Existing valid ZIPs are reused, so the
@@ -187,43 +213,38 @@ for the Greenpoint grid cell, hourly `temperature_2m` and `precipitation`, in
 [documentation](https://open-meteo.com/en/docs/historical-weather-api) describes
 the source and request parameters.
 
-`g_service_closures_confirmed_pre_august.csv` is a small generated file, not a
-separately hosted download. Regenerate it by running the
-`confirmed-g-closures-pre-august` cell in
-[`Citi Bike Demand Analysis.ipynb`](../Citi%20Bike%20Demand%20Analysis.ipynb).
+`g_service_closures_confirmed_pre_august` is a small generated table, not a
+separately hosted download. `citibike-prepare` builds it from the notices listed
+in `src/citibike/study.py`.
 It has one row per weekend, with local start/end timestamps, the source notice
 URL, and a `times_assumed` flag. The notice pages are the underlying sources:
 
 | Weekend | MTA Weekender notice |
 |---|---|
-| Feb 27â€“Mar 2, 2026 | [Feb 27â€“Mar 2 notice](https://www.mta.info/article/mta-weekender-february-27-march-2-2026) |
-| Mar 6â€“9, 2026 | [Mar 6â€“9 notice](https://www.mta.info/article/mta-weekender-march-6-9-2026) |
-| Mar 13â€“16, 2026 | [Mar 13â€“16 notice](https://www.mta.info/article/mta-weekender-march-13-16-2026) |
-| Mar 20â€“23, 2026 | [Mar 20â€“23 notice](https://www.mta.info/article/mta-weekender-march-20-23-2026) |
-| Mar 27â€“30, 2026 | [Mar 27â€“30 notice](https://www.mta.info/article/mta-weekender-march-27-30-2026) |
-| Apr 17â€“20, 2026 | [Apr 17â€“20 notice](https://www.mta.info/article/mta-weekender-april-17-20-2026) |
-| Jun 5â€“8, 2026 | [Jun 5â€“8 notice](https://www.mta.info/article/mta-weekender-june-5-8-2026) |
-| Jun 19â€“22, 2026 | [Jun 19â€“22 notice](https://www.mta.info/article/mta-weekender-june-19-22-2026) |
-| Jul 10â€“13, 2026 | [Jul 10â€“13 notice](https://www.mta.info/article/mta-weekender-july-10-13-2026) |
+| Feb 27–Mar 2, 2026 | [Feb 27–Mar 2 notice](https://www.mta.info/article/mta-weekender-february-27-march-2-2026) |
+| Mar 6–9, 2026 | [Mar 6–9 notice](https://www.mta.info/article/mta-weekender-march-6-9-2026) |
+| Mar 13–16, 2026 | [Mar 13–16 notice](https://www.mta.info/article/mta-weekender-march-13-16-2026) |
+| Mar 20–23, 2026 | [Mar 20–23 notice](https://www.mta.info/article/mta-weekender-march-20-23-2026) |
+| Mar 27–30, 2026 | [Mar 27–30 notice](https://www.mta.info/article/mta-weekender-march-27-30-2026) |
+| Apr 17–20, 2026 | [Apr 17–20 notice](https://www.mta.info/article/mta-weekender-april-17-20-2026) |
+| Jun 5–8, 2026 | [Jun 5–8 notice](https://www.mta.info/article/mta-weekender-june-5-8-2026) |
+| Jun 19–22, 2026 | [Jun 19–22 notice](https://www.mta.info/article/mta-weekender-june-19-22-2026) |
+| Jul 10–13, 2026 | [Jul 10–13 notice](https://www.mta.info/article/mta-weekender-july-10-13-2026) |
 
 Only the Feb 27 notice was read in full to verify the G closure times. The
 notebook assigns 21:45 Friday to 05:00 Monday to the other eight weekends, which
 are marked `times_assumed = True`; treat their timestamps as estimates rather
 than verified notice details. 2024 closure dates still need a source.
 
-## Modeling datasets (Section 2.6)
+## Modeling tables (Section 2.6)
 
-These files are in `datasource/processed/`.
-
-Built by the notebook from the trip months above and cached here. All files are gitignored and can be rebuilt by running the notebook.
-
-| File | Content |
+| Table | Content |
 |---|---|
-| `mta_subway_shutdowns.csv` | One row per shutdown event and affected G stop (13 confirmed 2026 weekends and the three 2024 phases), with coordinates, window, and the Citi Bike stations within 0.25 mile |
-| `model_station_sets.csv` | 94 corridor stations and 60 control stations (seed 622, more than 3 miles from any G stop) |
-| `trip_hourly_model_stations.parquet` | Hourly departures and arrivals per model station, May to September 2024 and January to September 2026 |
-| `analysis_station_hour_panel_extended.parquet` | Station hour panel with weather, calendar, shutdown and placebo flags, four week baseline, normal profile, chronological split and status derived proxy |
-| `baseline_accuracy_by_month.csv` | MAE and Poisson deviance of the baseline by month and station group |
-| `shutdown_effect_screening.csv` | Actual to profile ratios at exposed and control stations by event type |
+| `mta_subway_shutdowns` | One row per shutdown event and affected G stop (13 confirmed 2026 weekends and the three 2024 phases), with coordinates, window, and the Citi Bike stations within 0.25 mile |
+| `model_station_sets` | 94 corridor stations and 60 control stations (seed 622, more than 3 miles from any G stop) |
+| `trips_station_hourly` | Hourly departures and arrivals per station code, all stations and months (the notebook counts the model stations from `trips` by trip file month) |
+| `analysis_station_hour_panel_extended` | Station hour panel with weather, calendar, shutdown and placebo flags, four week baseline, normal profile, chronological split and status derived proxy |
+| `baseline_accuracy_by_month` | MAE and Poisson deviance of the baseline by month and station group |
+| `shutdown_effect_screening` | Actual to profile ratios at exposed and control stations by event type |
 
 Limits: the 2024 phase dates come from the MTA notice text and use whole days; 3 of the 16 closure weekends named in the proposal were not found in MTA notices; eight pre August 2026 weekends use assumed times.

@@ -1,0 +1,55 @@
+# Cleans the raw files and writes the analysis tables (jobs/citibike_prepare.py).
+# Notebook paths are relative to this file.
+resources:
+  jobs:
+    citibike_prepare:
+      name: citibike-prepare
+      description: >
+        Cleans the raw files in /Volumes/${var.catalog}/${var.schema}/${var.volume}/datasource and writes
+        analysis-ready Delta tables to ${var.catalog}.${var.schema} (trips, hourly station demand and status,
+        stations, weather, G closures and the station-hour modeling panels). Trip months are loaded
+        incrementally. Started by citibike-download after each download; it can also be run on its own.
+      tags:
+        project: data622_nyc_bikes
+        layer: clean
+
+      max_concurrent_runs: 1
+      queue:
+        enabled: true
+      timeout_seconds: 10800
+
+      parameters:
+        - name: catalog
+          default: ${var.catalog}
+        - name: schema
+          default: ${var.schema}
+        - name: volume
+          default: ${var.volume}
+        - name: full_refresh
+          default: "false"
+        # Write the tables to another schema of the same catalog (empty: the schema above). Used to check changes.
+        - name: target_schema
+          default: ""
+
+      email_notifications:
+        on_failure:
+          - ${var.notify_email}
+        on_duration_warning_threshold_exceeded:
+          - ${var.notify_email}
+      notification_settings:
+        no_alert_for_skipped_runs: true
+
+      # The first run loads every trip month; later runs only load new or changed months.
+      health:
+        rules:
+          - metric: RUN_DURATION_SECONDS
+            op: GREATER_THAN
+            value: 5400
+
+      tasks:
+        - task_key: prepare
+          notebook_task:
+            notebook_path: ../jobs/citibike_prepare.py
+          max_retries: 1
+          min_retry_interval_millis: 300000
+          timeout_seconds: 9000

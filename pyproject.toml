@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "citibike-g-train"
+version = "0.1.0"
+description = "DATA 622: Citi Bike demand during G train disruptions in Greenpoint (Databricks)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=1.5",
+    "numpy>=1.23",
+    "pyarrow>=12",
+]
+
+[project.optional-dependencies]
+# Run the analysis notebook (figures, models, statistics)
+analysis = [
+    "matplotlib>=3.7",
+    "scikit-learn>=1.3",
+    "scipy>=1.10",
+    "lightgbm>=4.0",
+    "ipykernel",
+]
+# Run notebooks from a local editor against Databricks serverless compute.
+# The version must support serverless and match your Python version; see README.md.
+local = [
+    "databricks-connect>=16.4",
+    "databricks-sdk",
+]
+dev = [
+    "pytest>=8",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"

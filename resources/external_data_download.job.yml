@@ -1,0 +1,63 @@
+# Daily download of the MTA, weather and GBFS sources.
+# Notebook paths are relative to this file.
+resources:
+  jobs:
+    external_data_download:
+      name: external-data-download
+      description: >
+        Downloads the MTA, Open-Meteo and GBFS sources used by "Citi Bike Demand Analysis" into
+        /Volumes/${var.catalog}/${var.schema}/${var.volume}/datasource under the file names the notebook uses.
+        Alert and incident tables are refreshed; the live MTA alert feed and GBFS station feeds are archived
+        with a timestamp on every run; the remaining sources are downloaded once.
+      tags:
+        project: data622_nyc_bikes
+        layer: raw
+
+      # Every day 05:00 New York time. The live MTA alert feed only holds current and future work, so a
+      # daily snapshot is what builds the alert history. One-time sources are skipped after the first run.
+      schedule:
+        quartz_cron_expression: "0 0 5 * * ?"
+        timezone_id: America/New_York
+
+      max_concurrent_runs: 1
+      queue:
+        enabled: true
+      timeout_seconds: 3600
+
+      parameters:
+        - name: catalog
+          default: ${var.catalog}
+        - name: schema
+          default: ${var.schema}
+        - name: volume
+          default: ${var.volume}
+        - name: alerts_start
+          default: "2026-01-01"
+        - name: force_refresh
+          default: "false"
+        # Rebuild the three weather files from scratch (used after the time zone fix)
+        - name: refresh_weather
+          default: "false"
+
+      email_notifications:
+        on_failure:
+          - ${var.notify_email}
+        on_duration_warning_threshold_exceeded:
+          - ${var.notify_email}
+      notification_settings:
+        no_alert_for_skipped_runs: true
+
+      health:
+        rules:
+          - metric: RUN_DURATION_SECONDS
+            op: GREATER_THAN
+            value: 1800
+
+      tasks:
+        - task_key: download
+          notebook_task:
+            notebook_path: ../jobs/external_data_download.py
+          max_retries: 2
+          min_retry_interval_millis: 300000   # wait 5 minutes before retrying
+          retry_on_timeout: true
+          timeout_seconds: 3000
