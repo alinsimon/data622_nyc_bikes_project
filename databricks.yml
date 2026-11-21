@@ -43,14 +43,14 @@ targets:
     mode: development
     default: true
     workspace:
-      host: https://dbc-26363ad8-a42a.cloud.databricks.com
-      profile: dev
+      host: https://dbc-ea9cccbd-698c.cloud.databricks.com
+      profile: cuny
 
   prod:
     mode: production
     workspace:
-      host: https://dbc-26363ad8-a42a.cloud.databricks.com
-      profile: dev
+      host: https://dbc-ea9cccbd-698c.cloud.databricks.com
+      profile: cuny
       root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
     run_as:
       user_name: ${workspace.current_user.userName}
